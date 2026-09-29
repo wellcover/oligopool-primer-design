@@ -16,7 +16,7 @@ Pooled oligo orders (Twist, IDT, etc.) are typically synthesized as:
 
 so that the entire pool can be PCR-amplified with one primer pair. The two flanking sequences must not misprime anywhere in the pool — a single 3′-end match to some payload sequence causes off-target amplification and distorts pool representation.
 
-`oligo.py` randomly samples candidate primers and keeps only those that are safe against **every sequence in your pool, on both strands**.
+`oligopool-primer-design.py` randomly samples candidate primers and keeps only those that are safe against **every sequence in your pool, on both strands**.
 
 ## Safety criteria
 
@@ -58,17 +58,17 @@ Genome-derived pools usually allow smaller k than random-sequence pools of the s
 ```bash
 # generate 20 candidate primers with default criteria
 # (k thresholds are auto-picked as the smallest feasible pair for your pool)
-python3 oligo.py --fasta my_pool.fa
+python3 oligopool-primer-design.py --fasta my_pool.fa
 
 # pick a pair, e.g. P03 as forward and P11 as reverse
 #   5′ flank  = P03
 #   3′ flank  = P11          (its reverse complement is the actual reverse primer)
 
 # reproducible runs (exact same output, single- or multi-threaded)
-python3 oligo.py --fasta my_pool.fa --seed 42
+python3 oligopool-primer-design.py --fasta my_pool.fa --seed 42
 
 # re-validate primers you designed earlier against an UPDATED pool
-python3 oligo.py --fasta my_pool_v2.fa --check safe_primers.txt
+python3 oligopool-primer-design.py --fasta my_pool_v2.fa --check safe_primers.txt
 ```
 
 Output: one primer per line (plain `safe_primers.txt`, pipe-friendly) plus a `.tsv` with GC and Wallace Tm for each primer. `--check` exits non-zero if any primer fails, so it can run in CI/Snakemake.
@@ -95,7 +95,7 @@ Orientation conventions:
 - `--primer-f` is appended at the 5′ end and doubles as the forward PCR primer.
 - `--primer-r` is appended at the 3′ end as-is; the reverse PCR primer is its reverse complement. If what you have is already the reverse primer itself, pass `--primer-r-is-rc` and it will be reverse-complemented automatically.
 
-## Parameters — `oligo.py`
+## Parameters — `oligopool-primer-design.py`
 
 | Flag | Default | Meaning |
 |---|---|---|

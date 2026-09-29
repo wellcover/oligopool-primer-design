@@ -16,7 +16,7 @@
 
 这样整个池用一对 PCR 引物即可扩增。两条侧翼序列不能在 pool 内任何位置发生错配起扩——哪怕只有一个 3′ 端匹配到某条 payload，都会造成脱靶扩增、扭曲文库比例。
 
-`oligo.py` 随机采样候选引物，只保留对 **pool 全部序列（含两条链）** 都安全的那些。
+`oligopool-primer-design.py` 随机采样候选引物，只保留对 **pool 全部序列（含两条链）** 都安全的那些。
 
 ## 安全标准
 
@@ -58,17 +58,17 @@ tail-k / inner-k **完全自动、不可手动指定**——程序总是为你�
 ```bash
 # 默认标准生成 20 条候选引物
 # (k 阈值自动选择: 取当前 pool 可行的最小组合)
-python3 oligo.py --fasta my_pool.fa
+python3 oligopool-primer-design.py --fasta my_pool.fa
 
 # 从中挑一对, 比如 P03 作正向、P11 作反向
 #   5′ 侧翼 = P03
 #   3′ 侧翼 = P11        (其反向互补才是实际的反向引物)
 
 # 可复现运行(单线程/多线程结果完全一致)
-python3 oligo.py --fasta my_pool.fa --seed 42
+python3 oligopool-primer-design.py --fasta my_pool.fa --seed 42
 
 # pool 更新后, 重新校验之前设计的引物是否仍然安全
-python3 oligo.py --fasta my_pool_v2.fa --check safe_primers.txt
+python3 oligopool-primer-design.py --fasta my_pool_v2.fa --check safe_primers.txt
 ```
 
 输出：`safe_primers.txt` 每行一条引物（方便管道处理），另附带 GC 与 Wallace Tm 的 `.tsv` 明细。`--check` 在任一引物不通过时以非零码退出，可直接接入 CI/Snakemake。
@@ -95,7 +95,7 @@ python3 build_oligos.py --fasta my_pool.fa \
 - `--primer-f` 加在 5′ 端，本身就是 PCR 正向引物。
 - `--primer-r` 按原样加在 3′ 端；PCR 反向引物是它的反向互补。如果你手上拿的已经是反向引物本身，加 `--primer-r-is-rc`，程序会自动取反向互补后再拼接。
 
-## 参数 — `oligo.py`
+## 参数 — `oligopool-primer-design.py`
 
 | 参数 | 默认值 | 含义 |
 |---|---|---|
