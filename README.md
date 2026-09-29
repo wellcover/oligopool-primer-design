@@ -21,8 +21,10 @@ A candidate primer is accepted only if:
 1. GC content within `[gc-min, gc-max]` (default 40–60%)
 2. No homopolymer run ≥ `max-homopolymer` (default 5)
 3. No G/C-only run ≥ `max-gc-run` (default 5)
-4. Its 3′ terminal `tail-k`-mer (default 10) does **not** occur anywhere in the pool (both strands) — the critical anti-mispriming filter
-5. No `inner-k`-mer (default 11) of the full primer occurs anywhere in the pool
+4. Its 3′ terminal `tail-k`-mer does **not** occur anywhere in the pool (both strands) — the critical anti-mispriming filter
+5. No `inner-k`-mer of the full primer occurs anywhere in the pool
+
+Both k values are auto-selected per pool (smallest feasible pair, see below); they are not user-settable.
 6. Optional but on by default: no 3′-end complementarity between any two accepted primers or with itself (`dimer-k`, default 8) — prevents primer-dimers when you pick a pair
 
 The pool's reverse complements are always included automatically, so a primer that is safe here is safe in both orientations.
@@ -44,9 +46,6 @@ python3 oligo.py --fasta my_pool.fa
 # pick a pair, e.g. P03 as forward and P11 as reverse
 #   5′ flank  = P03
 #   3′ flank  = P11          (its reverse complement is the actual reverse primer)
-
-# larger pool? raise the k-mer thresholds
-python3 oligo.py --fasta my_pool.fa -n 40 --threads 16 --tail-k 12 --inner-k 13
 
 # reproducible runs (exact same output, single- or multi-threaded)
 python3 oligo.py --fasta my_pool.fa --seed 42
@@ -91,8 +90,6 @@ Orientation conventions:
 | `--gc-min / --gc-max` | 0.40 / 0.60 | GC window |
 | `--max-homopolymer` | 5 | reject if any single-base run ≥ this |
 | `--max-gc-run` | 5 | reject if any G/C-only run ≥ this |
-| `--tail-k` | auto (from 10) | 3′ terminal k-mer that must be absent from pool |
-| `--inner-k` | auto | internal k-mer that must be absent from pool |
 | `--dimer-k` | 8 | pairwise 3′ complementarity check (0 = off) |
 | `--gc-clamp` | 0 | require ≥ N G/C in last 5 nt (0 = off) |
 | `--seed` | none | random seed, fully reproducible |
@@ -109,12 +106,12 @@ Orientation conventions:
 | `--out` | fasta dir + `oligo_for_synthesis` | output prefix (`.fa` / `.csv` / `.pcr_primers.txt`) |
 | `--no-verify` | off | skip primer-vs-pool safety verification |
 | `--force` | off | write outputs even if verification fails |
-| `--tail-k / --inner-k / --dimer-k` | auto / auto / 8 | verification thresholds |
+| `--dimer-k` | 8 | verification: pairwise 3′ complementarity length (0 = off) |
 | `--max-len` | 300 | warn when final oligos exceed this length |
 
-## Choosing `--tail-k` / `--inner-k`
+## How the k thresholds are chosen
 
-You normally don't have to: when `--tail-k` / `--inner-k` are not given, the tool **auto-selects the smallest feasible pair** for your pool — it starts at the strictest 10 / 11, verifies feasibility with a 150,000-candidate pilot run against your actual pool, and relaxes by +1 until candidates pass. The chosen pair is printed; pass the flags explicitly when you need a fixed stringency (e.g. to match a previous design).
+`tail-k` / `inner-k` are **not user-settable** — the tool always auto-selects the smallest feasible pair for your pool: it starts at the strictest 10 / 11, verifies feasibility with a 150,000-candidate pilot run against your actual pool, and relaxes by +1 until candidates pass. The chosen pair is printed on every run. This keeps every design at the strictest standard its pool allows, with no parameters to guess.
 
 Reference values (total bases, both strands; from random and genome-derived test pools):
 
@@ -125,7 +122,7 @@ Reference values (total bases, both strands; from random and genome-derived test
 | 16,000,000 – 60,000,000 bp | 11 / 12 – 13 / 14 |
 | above 60,000,000 bp | 13 / 14 or higher |
 
-Genome-derived pools usually allow smaller k than random-sequence pools of the same size: their k-mer distribution is GC-skewed while candidate primers are GC-balanced, so the relevant k-mers are the rare ones. If a manually specified pair is unsatisfiable, the tool reports it instead of looping forever.
+Genome-derived pools usually allow smaller k than random-sequence pools of the same size: their k-mer distribution is GC-skewed while candidate primers are GC-balanced, so the relevant k-mers are the rare ones. If no k up to the cap works, the tool reports it instead of looping forever.
 
 ## Performance
 
@@ -140,15 +137,14 @@ Genome-derived pools usually allow smaller k than random-sequence pools of the s
 用法：
 
 ```bash
-python3 oligo.py --fasta my_pool.fa                        # 自动选 k, 默认参数生成 20 条
-python3 oligo.py --fasta my_pool.fa --tail-k 12 --inner-k 13   # 显式固定 k(如需对齐旧设计)
+python3 oligo.py --fasta my_pool.fa                        # k 自动选择, 生成 20 条
 python3 oligo.py --fasta my_pool_v2.fa --check safe_primers.txt  # pool 更新后校验旧引物
 
 # 选定两条后, 一条命令生成送合成的完整序列 (fa + csv + PCR 引物对)
 python3 build_oligos.py --fasta my_pool.fa --primer-f <P_i序列> --primer-r <P_j序列>
 ```
 
-结果中任取两条 P_i / P_j：5′ 端加 P_i，3′ 端加 P_j（其反向互补即为反向引物）。未指定 `--tail-k/--inner-k` 时自动从最严格的 10/11 出发、用预试验实测可行性后选**可行的最小 k**（最安全），并打印选择过程。`build_oligos.py` 会在写出前自动校验两条引物对当前 pool 的安全性（3′ 错配 / 内部 k-mer / 二聚体），不安全则拒绝输出，避免 pool 更新后误用旧引物。同一 `--seed` 下结果可精确复现。仅依赖 Python 标准库，装了 numpy 更快。
+结果中任取两条 P_i / P_j：5′ 端加 P_i，3′ 端加 P_j（其反向互补即为反向引物）。tail-k / inner-k 由程序自动选择（从最严格的 10/11 出发、预试验实测可行性后取可行的最小 k，每次运行都会打印选了什么），不接受手动指定。`build_oligos.py` 会在写出前自动校验两条引物对当前 pool 的安全性（3′ 错配 / 内部 k-mer / 二聚体），不安全则拒绝输出，避免 pool 更新后误用旧引物。同一 `--seed` 下结果可精确复现。仅依赖 Python 标准库，装了 numpy 更快。
 
 ## License
 

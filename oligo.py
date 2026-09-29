@@ -13,11 +13,12 @@ oligo 结构: [引物F结合序列] + payload + [引物R结合序列(RC)]
   6. 引物间/自身 3′ 端 dimer_k-mer 互补     -- 防 primer-dimer(新增, --dimer-k 0 关闭)
 
 注: 原版同时检查 11-mer 和 12-mer; 12-mer 命中必然伴随其子 11-mer 命中,
-    12-mer 检查是纯冗余, 本版合并为单一 --inner-k(默认 11, 与原版等效)。
+    12-mer 检查是纯冗余, 本版合并为单一 inner_k。
+    tail_k / inner_k 由程序按 pool 大小自动选择(可行的最小 k), 不接受指定。
 
 用法示例:
     python3 oligo.py --fasta combined_slice.fa
-    python3 oligo.py --fasta xx.fa -n 40 --threads 16 --tail-k 12 --inner-k 13
+    python3 oligo.py --fasta xx.fa -n 40 --threads 16
     python3 oligo.py --fasta xx.fa --check safe_primers.txt   # 校验已有引物
 """
 
@@ -239,48 +240,29 @@ def pilot_hits(sets, tk, ik, primer_len=20, gc_min=0.40, gc_max=0.60,
     return hit
 
 
-def resolve_k_and_build(pool_seqs, tail_k=None, inner_k=None, primer_len=20,
-                        seed=None, verbose=True, n_try=150000):
-    """确定 (tail_k, inner_k) 并构建 k-mer 集合, 返回 (tk, ik, sets).
-    - 两者都指定: 直接使用
-    - 只指定一个: 另一个按 inner = tail + 1 联动
-    - 都未指定: 从最严格的 (10, 11) 开始, 用预试验实测通过率,
-      不足则逐步 +1, 选到可行的最小 k (最安全), 并打印选择过程."""
+def resolve_k_and_build(pool_seqs, primer_len=20, verbose=True, n_try=150000):
+    """自动确定 (tail_k, inner_k) 并构建 k-mer 集合, 返回 (tk, ik, sets).
+    从最严格的 (10, 11) 开始, 用预试验实测通过率, 不足则逐步 +1,
+    选到可行的最小 k (最安全). k 为内部参数, 不对外暴露."""
     t0 = time.time()
-    if tail_k is not None and inner_k is not None:
-        tk, ik = tail_k, inner_k
-        sets = build_kmer_sets(pool_seqs, sorted({tk, ik}))
+    tk, ik = 10, 11
+    k_max = min(21, primer_len)
+    while True:
+        sets = build_kmer_sets(pool_seqs, [tk, ik])
+        hits = pilot_hits(sets, tk, ik, primer_len=primer_len, n_try=n_try)
         if verbose:
-            print("  使用指定阈值 tail-k=%d / inner-k=%d" % (tk, ik))
-        return tk, ik, sets
-    if tail_k is not None:
-        tk, ik = tail_k, tail_k + 1
-    elif inner_k is not None:
-        tk, ik = inner_k - 1, inner_k
-    else:
-        tk, ik = 10, 11
-        while True:
-            sets = build_kmer_sets(pool_seqs, [tk, ik])
-            hits = pilot_hits(sets, tk, ik, primer_len=primer_len, n_try=n_try,
-                              seed=(seed if seed is not None else 888777))
+            print("  自动尝试 tail-k=%d / inner-k=%d: 预试验 %d 条随机候选通过 %d 条" % (
+                tk, ik, n_try, hits))
+        if hits >= 1:
             if verbose:
-                print("  自动尝试 tail-k=%d / inner-k=%d: 预试验 %d 条随机候选通过 %d 条" % (
-                    tk, ik, n_try, hits))
-            if hits >= 1:
-                if verbose:
-                    print("  自动选择 tail-k=%d / inner-k=%d (可行的最小 k, 用时 %.1f s);" % (
-                        tk, ik, time.time() - t0) +
-                        " 如需固定请显式传参")
-                return tk, ik, sets
-            if ik >= 17:
-                if verbose:
-                    print("  警告: k 提高到 %d/%d 仍无可行候选" % (tk, ik))
-                return tk, ik, sets
-            tk, ik = tk + 1, ik + 1
-    if verbose:
-        print("  阈值联动: tail-k=%d / inner-k=%d" % (tk, ik))
-    sets = build_kmer_sets(pool_seqs, sorted({tk, ik}))
-    return tk, ik, sets
+                print("  选定 tail-k=%d / inner-k=%d (可行的最小 k, 用时 %.1f s)" % (
+                    tk, ik, time.time() - t0))
+            return tk, ik, sets
+        if ik >= k_max:
+            if verbose:
+                print("  警告: k 到 %d/%d 仍无可行候选" % (tk, ik))
+            return tk, ik, sets
+        tk, ik = tk + 1, ik + 1
 
 
 # ========================= 生成主流程 =========================
@@ -338,8 +320,7 @@ def generate_primers(sets, cfg):
     if len(accepted) < n:
         sys.stderr.write("")
         sys.stderr.write("[错误] 只得到 %d/%d 条引物, 约束可能不可满足:" % (len(accepted), n))
-        sys.stderr.write("  请显式指定更大的 --tail-k/--inner-k (如 13/14, 14/15),")
-        sys.stderr.write("  或放宽 --gc-min/--gc-max, 或增大 --max-attempts.")
+        sys.stderr.write("  请尝试放宽 --gc-min/--gc-max 或增大 --max-attempts.")
         if accepted:
             _write_outputs(accepted, cfg)
             sys.stderr.write("已将部分结果写出, 请调整参数后重试.")
@@ -449,10 +430,6 @@ def main():
                     help="同碱基连续达到该值即拒绝")
     ap.add_argument("--max-gc-run", type=int, default=5,
                     help="G/C 连续达到该值即拒绝")
-    ap.add_argument("--tail-k", type=int, default=None,
-                    help="3′ 端 k-mer 长度(默认: 自动按 pool 大小选择可行的最小 k)")
-    ap.add_argument("--inner-k", type=int, default=None,
-                    help="全长内部 k-mer 长度(默认: 自动, 与 --tail-k 联动)")
     ap.add_argument("--dimer-k", type=int, default=8,
                     help="引物间 3′ 端互补检查长度(0=关闭)")
     ap.add_argument("--gc-clamp", type=int, default=0,
@@ -466,12 +443,6 @@ def main():
 
     if not (4 <= args.primer_len <= 60):
         ap.error("--primer-len 应在 4-60 之间")
-    for name, val in [("tail-k", args.tail_k), ("inner-k", args.inner_k)]:
-        if val is not None:
-            if not (4 <= val <= 31):
-                ap.error("--%s 应在 4-31 之间" % name)
-            if val > args.primer_len:
-                ap.error("--%s 不能超过 --primer-len" % name)
     if not (0 < args.gc_min < args.gc_max < 1):
         ap.error("需满足 0 < gc-min < gc-max < 1")
 
@@ -493,12 +464,10 @@ def main():
         len(seqs), total_bp / 1e6, n_bad))
     print("  加入反向互补链后总池 %.2f Mb" % (2 * total_bp / 1e6))
 
-    print("[2/4] 确定 k 阈值并构建 k-mer 集合 (%s) ..." % (
+    print("[2/4] 自动确定 k 阈值并构建 k-mer 集合 (%s) ..." % (
         "numpy 加速" if np is not None else "纯 python"))
     pool_seqs = seqs + [rc_seq(s) for s in seqs]
-    tk, ik, sets = resolve_k_and_build(pool_seqs, args.tail_k, args.inner_k,
-                                       primer_len=args.primer_len, seed=args.seed)
-    args.tail_k, args.inner_k = tk, ik
+    tk, ik, sets = resolve_k_and_build(pool_seqs, primer_len=args.primer_len)
     cfg["tail_k"], cfg["inner_k"] = tk, ik
     for k in sorted({tk, ik}):
         print("  k=%d: %d 个不同 k-mer" % (k, len(sets[k])))
@@ -508,15 +477,11 @@ def main():
         check_primers(sets, cfg, args.check)
         return
 
-    # 可行性信息: 随机 k-mer 落在 pool 的比例(自动模式已保证可行, 这里仅提示;
-    # 用户显式指定过小 k 时作为预警)
+    # 信息: 随机 k-mer 落在 pool 的比例(自动选 k 已保证可行性)
     rng0 = random.Random(args.seed if args.seed is not None else 20260929)
     for k in sorted({tk, ik}):
-        r = sample_presence(sets, k, rng0)
-        line = "  随机 %d-mer 落在 pool 的比例: %.2f%%" % (k, 100 * r)
-        if r >= 0.995:
-            line += "  <-- 几乎必被拒绝! 请增大 --tail-k/--inner-k"
-        print(line)
+        print("  随机 %d-mer 落在 pool 的比例: %.2f%%" % (
+            k, 100 * sample_presence(sets, k, rng0)))
 
     accepted = generate_primers(sets, cfg)
     print_report(accepted)

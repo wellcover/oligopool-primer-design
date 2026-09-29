@@ -94,10 +94,6 @@ def main():
                     help="输出前缀(默认在 fasta 同目录 oligo_for_synthesis)")
     ap.add_argument("--no-verify", action="store_true", help="跳过引物安全性校验")
     ap.add_argument("--force", action="store_true", help="校验不通过也强制写出")
-    ap.add_argument("--tail-k", type=int, default=None,
-                    help="校验用 3′ 端 k-mer 长度(默认: 自动按 pool 大小选择)")
-    ap.add_argument("--inner-k", type=int, default=None,
-                    help="校验用内部 k-mer 长度(默认: 自动, 与 --tail-k 联动)")
     ap.add_argument("--dimer-k", type=int, default=8, help="校验用二聚体检查长度(0=关)")
     ap.add_argument("--max-len", type=int, default=300,
                     help="完整 oligo 长度告警阈值(仅提示, 不截断)")
@@ -108,10 +104,8 @@ def main():
     for label, p in (("--primer-f", pf), ("--primer-r", pr)):
         if not is_acgt(p):
             ap.error("%s 含非 ACGT 字符: %s" % (label, p))
-    k_need = max([x for x in (args.tail_k, args.inner_k, args.dimer_k)
-                  if x is not None] or [0])
-    if k_need and (len(pf) < k_need or len(pr) < k_need):
-        ap.error("引物长度需 >= max(tail-k, inner-k, dimer-k) = %d" % k_need)
+    if args.dimer_k and (len(pf) < args.dimer_k or len(pr) < args.dimer_k):
+        ap.error("引物长度需 >= --dimer-k = %d" % args.dimer_k)
     r_site = rc_seq(pr) if args.primer_r_is_rc else pr
     if args.out is None:
         args.out = os.path.join(
@@ -154,11 +148,9 @@ def main():
         print("  警告: %d 条超过 --max-len %d nt, 请确认合成厂商长度上限" % (over, args.max_len))
 
     if not args.no_verify:
-        print("[2/3] 校验引物对当前 pool 的安全性 ...")
+        print("[2/3] 校验引物对当前 pool 的安全性 (k 自动选择) ...")
         pool = [s for _, s in kept] + [rc_seq(s) for _, s in kept]
-        tk, ik, sets = resolve_k_and_build(pool, args.tail_k, args.inner_k,
-                                           primer_len=len(pf))
-        args.tail_k, args.inner_k = tk, ik
+        tk, ik, sets = resolve_k_and_build(pool, primer_len=len(pf))
         for k in sorted({tk, ik}):
             print("  k=%d: %d 个不同 k-mer" % (k, len(sets[k])))
         problems = verify_pair(pf, r_site, sets, tk, ik, args.dimer_k)
