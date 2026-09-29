@@ -126,7 +126,7 @@ Genome-derived pools usually allow smaller k than random-sequence pools of the s
 
 ## Performance
 
-42,000 oligos (6.7 Mb pool, 13.4 Mb with reverse complements): **~7 s total** with numpy — k-mer sets built by vectorized rolling 2-bit encoding, shared with worker processes via fork copy-on-write, primers found by parallel rejection sampling.
+42,000 160bp oligos (6.7 Mb pool, 13.4 Mb with reverse complements): **~7 s total** with numpy — k-mer sets built by vectorized rolling 2-bit encoding, shared with worker processes via fork copy-on-write, primers found by parallel rejection sampling.
 
 ## 中文说明
 
