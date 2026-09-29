@@ -56,7 +56,29 @@ python3 oligo.py --fasta my_pool_v2.fa --check safe_primers.txt
 
 Output: one primer per line (plain `safe_primers.txt`, pipe-friendly) plus a `.tsv` with GC and Wallace Tm for each primer. `--check` exits non-zero if any primer fails, so it can run in CI/snakemake.
 
-## Parameters
+## Build the final synthesis oligos
+
+`build_oligos.py` takes your payload FASTA plus the two chosen primers and emits the full sequences ready to order:
+
+```bash
+python3 build_oligos.py --fasta my_pool.fa \
+    --primer-f CTCGATGATGAAAACCGTCT --primer-r TCCCGACTAAGCCCATGGAT
+```
+
+produces (prefix `--out`, default `oligo_for_synthesis`):
+
+- `out.fa` — `[primer-F] + payload + [primer-R site]`, original names kept, 80-col wrapped
+- `out.csv` — `name,sequence`, vendor-order format
+- `out.pcr_primers.txt` — the actual PCR primer pair (F as-is, R = reverse complement of the 3′ flank), so nobody has to figure out orientation by hand
+
+Before writing anything it **re-verifies both primers against the exact pool you are about to submit** (3′ tail k-mer, internal k-mer, primer-dimer). If a primer has become unsafe — e.g. your pool grew after the primers were designed — it refuses to write and exits non-zero (`--force` to override, `--no-verify` to skip). It also drops sequences containing non-ACGT characters (not orderable) and warns when oligos exceed `--max-len` (default 300 nt).
+
+Orientation conventions:
+
+- `--primer-f` is appended at the 5′ end and doubles as the forward PCR primer.
+- `--primer-r` is appended at the 3′ end as-is; the reverse PCR primer is its reverse complement. If what you have is already the reverse primer itself, pass `--primer-r-is-rc` and it will be reverse-complemented automatically.
+
+## Parameters — `oligo.py`
 
 | Flag | Default | Meaning |
 |---|---|---|
@@ -75,6 +97,19 @@ Output: one primer per line (plain `safe_primers.txt`, pipe-friendly) plus a `.t
 | `--seed` | none | random seed, fully reproducible |
 | `--max-attempts` | 2000000 | per-primer attempt cap (no infinite loops) |
 | `--check FILE` | — | validate existing primers against the pool |
+
+## Parameters — `build_oligos.py`
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--fasta` | (required) | payload sequences, FASTA |
+| `--primer-f` / `--primer-r` | (required) | flanking primer binding sequences |
+| `--primer-r-is-rc` | off | given `--primer-r` is the reverse primer itself; RC it before appending |
+| `--out` | fasta dir + `oligo_for_synthesis` | output prefix (`.fa` / `.csv` / `.pcr_primers.txt`) |
+| `--no-verify` | off | skip primer-vs-pool safety verification |
+| `--force` | off | write outputs even if verification fails |
+| `--tail-k / --inner-k / --dimer-k` | 10 / 11 / 8 | verification thresholds |
+| `--max-len` | 300 | warn when final oligos exceed this length |
 
 ## Choosing `--tail-k` / `--inner-k` for your pool size
 
@@ -105,9 +140,12 @@ If the constraint set is unsatisfiable, the tool tells you instead of looping fo
 python3 oligo.py --fasta my_pool.fa                        # 默认参数生成 20 条
 python3 oligo.py --fasta my_pool.fa --tail-k 12 --inner-k 13   # 大 pool 提高阈值
 python3 oligo.py --fasta my_pool_v2.fa --check safe_primers.txt  # pool 更新后校验旧引物
+
+# 选定两条后, 一条命令生成送合成的完整序列 (fa + csv + PCR 引物对)
+python3 build_oligos.py --fasta my_pool.fa --primer-f <P_i序列> --primer-r <P_j序列>
 ```
 
-结果中任取两条 P_i / P_j：5′ 端加 P_i，3′ 端加 P_j（其反向互补即为反向引物）。同一 `--seed` 下结果可精确复现。仅依赖 Python 标准库，装了 numpy 更快。
+结果中任取两条 P_i / P_j：5′ 端加 P_i，3′ 端加 P_j（其反向互补即为反向引物）。`build_oligos.py` 会在写出前自动校验两条引物对当前 pool 的安全性（3′ 错配 / 内部 k-mer / 二聚体），不安全则拒绝输出，避免 pool 更新后误用旧引物。同一 `--seed` 下结果可精确复现。仅依赖 Python 标准库，装了 numpy 更快。
 
 ## License
 
