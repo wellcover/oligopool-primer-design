@@ -6,7 +6,7 @@ build_oligos.py - 接受 payload(oligo) FASTA 与两条引物序列, 生成可�
 oligo 结构:
     [primer-F] + payload + [primer-R 位点]
 
-约定 (与 oligopool-primer-design.py 配套):
+约定 (与 oligopool_primer_design.py 配套):
     --primer-f : 直接加在 5′ 端的序列, 同时也是 PCR 正向引物
     --primer-r : 直接加在 3′ 端的序列; PCR 反向引物是它的反向互补
                  (若手上拿的已经是反向引物本身, 加 --primer-r-is-rc 自动取反)
@@ -25,29 +25,11 @@ oligo 结构:
 
 import argparse
 import csv
-import importlib.util
 import os
 import sys
 import time
 
-
-def _load_designer():
-    """加载同目录的 oligopool-primer-design.py(文件名含连字符, 不能直接 import)"""
-    path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                        "oligopool-primer-design.py")
-    if not os.path.exists(path):
-        sys.stderr.write("[错误] 找不到同目录的 oligopool-primer-design.py" + chr(10))
-        sys.exit(1)
-    spec = importlib.util.spec_from_file_location("oligopool_primer_design", path)
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
-
-
-_designer = _load_designer()
-rc_seq = _designer.rc_seq
-encode_kmer = _designer.encode_kmer
-resolve_k_and_build = _designer.resolve_k_and_build
+from oligopool_primer_design import rc_seq, encode_kmer, resolve_k_and_build
 
 
 def is_acgt(s):
