@@ -29,7 +29,7 @@ A candidate primer is accepted only if:
 5. No inner-k-mer of the full primer occurs anywhere in the pool
 6. No 3′-end complementarity between any two accepted primers, or of a primer with itself (`dimer-k`, default 8; set 0 to disable) — prevents primer-dimers when you pick a pair
 
-The pool's reverse complements are always included automatically, so a primer that is safe here is safe in both orientations.
+The pool's reverse complements are always included automatically, so a primer that is safe here is safe in both orientations. Every candidate is additionally screened **in both orientations** (a 3′ flank works in the tube as its reverse complement — the actual reverse primer — whose 3′ end corresponds to the site's 5′ head, so both ends must be clean).
 
 > Note: the classic "check 11-mer and 12-mer separately" scheme is redundant — any 12-mer match implies an 11-mer match. This tool applies a single internal k-mer rule, auto-selected (see below), which is equivalent to the stricter of the two.
 

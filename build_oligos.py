@@ -62,9 +62,13 @@ def pool_hits(primer, sets, k):
 
 
 def verify_pair(f, r_site, sets, tail_k, inner_k, dimer_k):
-    """校验两条引物对 pool 的安全性, 返回问题列表(空=通过)"""
+    """校验两条引物(含反向互补形式, 即实际 PCR 管中的引物)对 pool 的安全性,
+    返回问题列表(空=通过)"""
     problems = []
-    for label, p in (("primer-F", f), ("primer-R 位点", r_site)):
+    f_rc = rc_seq(f)
+    r_rc = rc_seq(r_site)
+    for label, p in (("primer-F", f), ("primer-F 反向互补", f_rc),
+                     ("primer-R 位点", r_site), ("实际反向引物 rc(R)", r_rc)):
         tail = p[-tail_k:]
         if encode_kmer(tail) in sets[tail_k]:
             problems.append("%s: 3′ 端 %d-mer %s 存在于 pool [3′ 错配起扩风险]" % (label, tail_k, tail))
@@ -73,10 +77,16 @@ def verify_pair(f, r_site, sets, tail_k, inner_k, dimer_k):
             problems.append("%s: %d-mer 命中 pool 共 %d/%d 窗口 (%s ...)" % (
                 label, inner_k, len(ih), len(p) - inner_k + 1, ",".join(ih[:3])))
     if dimer_k > 0:
-        f_trc = rc_seq(f[-dimer_k:])
-        r_trc = rc_seq(r_site[-dimer_k:])
-        if f_trc in f or f_trc in r_site or r_trc in f or r_trc in r_site:
-            problems.append("引物 3′ 端互补(自身或两条之间), 有 primer-dimer 风险 (dimer_k=%d)" % dimer_k)
+        quartet = [f, f_rc, r_site, r_rc]
+        names = ["F", "rc(F)", "R 位点", "rc(R)"]
+        for ai in range(len(quartet)):
+            for bi in range(ai + 1, len(quartet)):
+                a, b = quartet[ai], quartet[bi]
+                if a == rc_seq(b):
+                    continue  # 引物与其自身结合位点互补属设计内
+                if rc_seq(a[-dimer_k:]) in b or rc_seq(b[-dimer_k:]) in a:
+                    problems.append("引物 3′ 端互补: %s 与 %s (实际使用形式), "
+                                    "primer-dimer 风险 (dimer_k=%d)" % (names[ai], names[bi], dimer_k))
     return problems
 
 

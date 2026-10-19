@@ -183,6 +183,17 @@ def fail_reasons(p, cfg, sets, detail=False):
     return reasons
 
 
+def fail_reasons_both(p, cfg, sets, detail=False):
+    """同时检查正向与反向互补两个形式.
+    3′ 侧翼位点的反向互补才是实际使用的反向 PCR 引物, 其 3′ 端
+    对应位点序列的 5′ 端头部 -- 两个方向都必须安全."""
+    r = fail_reasons(p, cfg, sets, detail)
+    r2 = fail_reasons(rc_seq(p), cfg, sets, detail)
+    if r2:
+        r = r + ["[反向互补形式, 即实际反向引物] " + x for x in r2]
+    return r
+
+
 def dimer_ok(cand, accepted, dimer_k):
     """3′ 端互补检查: cand 尾部 rc 出现在自身或任一已接受引物中(及反向)即拒绝"""
     if dimer_k <= 0:
@@ -206,7 +217,7 @@ def _worker(i):
     L = cfg["primer_len"]
     for _attempt in range(cfg["max_attempts"]):
         p = "".join(rng.choices("ACGT", k=L))
-        if not fail_reasons(p, cfg, sets):
+        if not fail_reasons_both(p, cfg, sets):
             return p
     return None
 
@@ -229,23 +240,25 @@ def pilot_hits(sets, tk, ik, primer_len=20, gc_min=0.40, gc_max=0.60,
     choices = rng.choices
     lo = gc_min * primer_len
     hi = gc_max * primer_len
+
+    def one_ok(s):
+        g = s.count("G") + s.count("C")
+        if g < lo or g > hi:
+            return False
+        h, gr = max_runs(s)
+        if h >= maxh or gr >= maxg:
+            return False
+        if encode_kmer(s[-tk:]) in sets[tk]:
+            return False
+        for i in range(len(s) - ik + 1):
+            if encode_kmer(s[i:i + ik]) in sets[ik]:
+                return False
+        return True
+
     hit = 0
     for _ in range(n_try):
         p = "".join(choices("ACGT", k=primer_len))
-        g = p.count("G") + p.count("C")
-        if g < lo or g > hi:
-            continue
-        h, gr = max_runs(p)
-        if h >= maxh or gr >= maxg:
-            continue
-        if encode_kmer(p[-tk:]) in sets[tk]:
-            continue
-        ok = True
-        for i in range(primer_len - ik + 1):
-            if encode_kmer(p[i:i + ik]) in sets[ik]:
-                ok = False
-                break
-        if ok:
+        if one_ok(p) and one_ok(rc_seq(p)):
             hit += 1
     return hit
 
@@ -279,6 +292,7 @@ def resolve_k_and_build(pool_seqs, primer_len=20, verbose=True, n_try=150000):
 def generate_primers(sets, cfg):
     n = cfg["n_primers"]
     accepted, seen = [], set()
+    dim_pool = []
     t0 = time.time()
     print("")
     print("[3/4] 生成引物 (n=%d, threads=%d) ..." % (n, cfg["threads"]))
@@ -289,9 +303,10 @@ def generate_primers(sets, cfg):
             if c is None or c in seen:
                 continue
             seen.add(c)
-            if not dimer_ok(c, accepted, cfg["dimer_k"]):
+            if not dimer_ok(c, dim_pool, cfg["dimer_k"]) or                     not dimer_ok(rc_seq(c), dim_pool, cfg["dimer_k"]):
                 continue
             accepted.append(c)
+            dim_pool.extend([c, rc_seq(c)])
             got += 1
             if len(accepted) >= n:
                 break
@@ -395,7 +410,7 @@ def check_primers(sets, cfg, path):
     print("")
     n_fail = 0
     for i, p in enumerate(primers, 1):
-        reasons = fail_reasons(p, cfg, sets, detail=True)
+        reasons = fail_reasons_both(p, cfg, sets, detail=True)
         gc = 100 * (p.count("G") + p.count("C")) / len(p)
         if reasons:
             n_fail += 1
@@ -411,6 +426,8 @@ def check_primers(sets, cfg, path):
         pairs = []
         for i in range(len(primers)):
             for j in range(i + 1, len(primers)):
+                if rc_seq(primers[i]) == primers[j]:
+                    continue  # 位点与其自身反向引物互补属设计内, 跳过
                 if rc_seq(primers[i][-dk:]) in primers[j] or \
                         rc_seq(primers[j][-dk:]) in primers[i]:
                     pairs.append((i, j))
@@ -450,11 +467,11 @@ def _gen_shared(sets, cfg, flank_pool, accepted, rng):
     L = cfg["primer_len"]
     for _attempt in range(cfg["max_attempts"]):
         p = "".join(rng.choices("ACGT", k=L))
-        if fail_reasons(p, cfg, sets):
+        if fail_reasons_both(p, cfg, sets):
             continue
         if flank_conflict(p, flank_pool, cfg["tail_k"], cfg["inner_k"]):
             continue
-        if not dimer_ok(p, accepted, cfg["dimer_k"]):
+        if not dimer_ok(p, accepted, cfg["dimer_k"]) or                 not dimer_ok(rc_seq(p), accepted, cfg["dimer_k"]):
             continue
         return p
     return None
@@ -539,13 +556,13 @@ def process_shared(fasta_paths, args, cfg):
             sys.stderr.write("  可减少文库数/放宽 --gc-min/--gc-max/增大 --max-attempts,")
             sys.stderr.write("  或改用 --mode separate 分芯片设计.")
             sys.exit(1)
-        accepted.append(F)
+        accepted.extend([F, rc_seq(F)])
         flanks.extend([F, rc_seq(F)])
         R = _gen_shared(sets, cfg, flanks, accepted, rng)
         if R is None:
             sys.stderr.write("[错误] 为文库 %s 生成 R 引物失败, 约束过紧;" % stem)
             sys.exit(1)
-        accepted.append(R)
+        accepted.extend([R, rc_seq(R)])
         flanks.extend([R, rc_seq(R)])
         pairs.append((stem, F, R))
 
