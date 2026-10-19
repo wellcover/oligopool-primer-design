@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-oligo.py - 为 oligopool 设计两侧通用引物结合序列
+oligopool_primer_design.py - 为 oligopool 设计两侧通用引物结合序列
 
 oligo 结构: [引物F结合序列] + payload + [引物R结合序列(RC)]
 本脚本针对 pool 全部序列(含反向互补链)筛选安全随机引物:
@@ -16,10 +16,20 @@ oligo 结构: [引物F结合序列] + payload + [引物R结合序列(RC)]
     12-mer 检查是纯冗余, 本版合并为单一 inner_k。
     tail_k / inner_k 由程序按 pool 大小自动选择(可行的最小 k), 不接受指定。
 
+多文件模式 (--fasta 可传多个文件, --mode 选择):
+    separate  模式1: 每个文件各自单独一张芯片合成, 依次独立设计,
+                    每个文件输出一组引物(自动按文件名命名输出)
+    shared    模式2: 多个文库共用一张芯片合成, 每文库分配一对专属引物;
+                    所有引物对"全部文库的联合 pool + 其他文库侧翼(含RC)"联合筛选,
+                    文库间扩增干扰最小, 用各自引物对即可分离单一文库;
+                    结果输出为单个文件
+
 用法示例:
-    python3 oligo.py --fasta combined_slice.fa
-    python3 oligo.py --fasta xx.fa -n 40 --threads 16
-    python3 oligo.py --fasta xx.fa --check safe_primers.txt   # 校验已有引物
+    python3 oligopool_primer_design.py --fasta combined_slice.fa
+    python3 oligopool_primer_design.py --fasta xx.fa -n 40 --threads 16
+    python3 oligopool_primer_design.py --fasta xx.fa --check safe_primers.txt   # 校验已有引物
+    python3 oligopool_primer_design.py --fasta A.fa B.fa                       # 模式1: 依次独立设计
+    python3 oligopool_primer_design.py --fasta A.fa B.fa --mode shared         # 模式2: 共芯片联合设计
 """
 
 import argparse
@@ -366,11 +376,16 @@ def print_report(accepted):
 # ========================= --check 模式 =========================
 def check_primers(sets, cfg, path):
     primers = []
+    seen = set()
     with open(path) as f:
         for line in f:
-            s = "".join(line.split()).upper()
-            if s and all(c in "ACGT" for c in s):
-                primers.append(s)
+            # 按空白/制表符拆字段, 提取纯 ACGT 且 >=10nt 的 token:
+            # 兼容纯列表 / safe_primers.txt.tsv / shared 模式多列 tsv
+            for tok in line.split():
+                s = tok.upper().strip(",;\"")
+                if len(s) >= 10 and s not in seen and all(c in "ACGT" for c in s):
+                    seen.add(s)
+                    primers.append(s)
     if not primers:
         sys.stderr.write("[错误] %s 中未读到有效引物序列" % path)
         sys.exit(1)
@@ -413,15 +428,180 @@ def check_primers(sets, cfg, path):
     sys.exit(1 if n_fail else 0)
 
 
+# ========================= 多文件流程 =========================
+def flank_conflict(primer, flank_pool, tk, ik):
+    """候选引物任一 k-mer 窗口出现在其他文库侧翼序列(含反向互补)中.
+    共芯片时其他文库的侧翼会随其扩增富集, 扩增产物流失到别的反应即为
+    高拷贝污染源, 因此跨文库侧翼与 payload 采用同样的 k-mer 隔离标准."""
+    L = len(primer)
+    for k in (tk, ik):
+        if k > L:
+            continue
+        for i in range(L - k + 1):
+            w = primer[i:i + k]
+            for fs in flank_pool:
+                if w in fs:
+                    return True
+    return False
+
+
+def _gen_shared(sets, cfg, flank_pool, accepted, rng):
+    """生成一条共芯片安全引物: 常规安全检查 + 跨文库侧翼检查 + 全体两两二聚体检查"""
+    L = cfg["primer_len"]
+    for _attempt in range(cfg["max_attempts"]):
+        p = "".join(rng.choices("ACGT", k=L))
+        if fail_reasons(p, cfg, sets):
+            continue
+        if flank_conflict(p, flank_pool, cfg["tail_k"], cfg["inner_k"]):
+            continue
+        if not dimer_ok(p, accepted, cfg["dimer_k"]):
+            continue
+        return p
+    return None
+
+
+def _read_union(fasta_paths):
+    """读取全部输入文件, 返回 (联合序列列表, 各文件名列表), 并打印每文件统计"""
+    union, stems = [], []
+    for fp in fasta_paths:
+        seqs = [s.upper() for s in read_fasta(fp) if s]
+        if not seqs:
+            sys.stderr.write("[错误] %s 中没有序列" % fp)
+            sys.exit(1)
+        print("  %s: %d 条, %.2f Mb" % (
+            os.path.basename(fp), len(seqs), sum(len(s) for s in seqs) / 1e6))
+        union += seqs
+        stems.append(os.path.splitext(os.path.basename(fp))[0])
+    return union, stems
+
+
+def process_single(fasta_path, args, cfg):
+    """单文件流程(单文件输入与模式1共用); cfg["out"] 由调用方设置"""
+    t0 = time.time()
+    print("[1/4] 读取 %s ..." % fasta_path)
+    seqs = [s.upper() for s in read_fasta(fasta_path) if s]
+    if not seqs:
+        sys.stderr.write("[错误] FASTA 中没有序列")
+        sys.exit(1)
+    n_bad = sum(1 for s in seqs for c in s if c not in "ACGTN")
+    total_bp = sum(len(s) for s in seqs)
+    print("  %d 条序列, 共 %.2f Mb; 非法碱基 %d 个(自动按断点处理)" % (
+        len(seqs), total_bp / 1e6, n_bad))
+    print("  加入反向互补链后总池 %.2f Mb" % (2 * total_bp / 1e6))
+
+    print("[2/4] 自动确定 k 阈值并构建 k-mer 集合 (%s) ..." % (
+        "numpy 加速" if np is not None else "纯 python"))
+    pool_seqs = seqs + [rc_seq(s) for s in seqs]
+    tk, ik, sets = resolve_k_and_build(pool_seqs, primer_len=args.primer_len)
+    cfg["tail_k"], cfg["inner_k"] = tk, ik
+    for k in sorted({tk, ik}):
+        print("  k=%d: %d 个不同 k-mer" % (k, len(sets[k])))
+    print("  用时 %.1f s" % (time.time() - t0))
+
+    rng0 = random.Random(args.seed if args.seed is not None else 20260929)
+    for k in sorted({tk, ik}):
+        print("  随机 %d-mer 落在 pool 的比例: %.2f%%" % (
+            k, 100 * sample_presence(sets, k, rng0)))
+
+    accepted = generate_primers(sets, cfg)
+    print_report(accepted)
+    _write_outputs(accepted, cfg)
+    print("")
+    print("总用时 %.1f s" % (time.time() - t0))
+
+
+def process_shared(fasta_paths, args, cfg):
+    """模式2: 多文库共一张芯片. 每文库分配一对专属引物, 全部引物对
+    联合 pool(全部文库 payload)+其他文库侧翼联合筛选, 文库间互相隔离."""
+    t0 = time.time()
+    print("[1/3] 读取 %d 个文库(共芯片):" % len(fasta_paths))
+    union, stems = _read_union(fasta_paths)
+    total_bp = sum(len(s) for s in union)
+    print("  联合 pool: %d 条, %.2f Mb (双链 %.2f Mb)" % (
+        len(union), total_bp / 1e6, 2 * total_bp / 1e6))
+
+    print("[2/3] 对联合 pool 自动选 k 并构建 k-mer 集合 (%s) ..." % (
+        "numpy 加速" if np is not None else "纯 python"))
+    pool = union + [rc_seq(s) for s in union]
+    tk, ik, sets = resolve_k_and_build(pool, primer_len=args.primer_len)
+    cfg["tail_k"], cfg["inner_k"] = tk, ik
+    for k in sorted({tk, ik}):
+        print("  k=%d: %d 个不同 k-mer" % (k, len(sets[k])))
+    print("  用时 %.1f s" % (time.time() - t0))
+
+    print("[3/3] 逐文库分配引物对 (对联合 pool + 已选侧翼联合筛选; 每文库固定一对, -n 不适用) ...")
+    rng = random.Random(args.seed)
+    accepted, flanks, pairs = [], [], []
+    for stem in stems:
+        F = _gen_shared(sets, cfg, flanks, accepted, rng)
+        if F is None:
+            sys.stderr.write("[错误] 为文库 %s 生成 F 引物失败, 约束过紧;" % stem)
+            sys.stderr.write("  可减少文库数/放宽 --gc-min/--gc-max/增大 --max-attempts,")
+            sys.stderr.write("  或改用 --mode separate 分芯片设计.")
+            sys.exit(1)
+        accepted.append(F)
+        flanks.extend([F, rc_seq(F)])
+        R = _gen_shared(sets, cfg, flanks, accepted, rng)
+        if R is None:
+            sys.stderr.write("[错误] 为文库 %s 生成 R 引物失败, 约束过紧;" % stem)
+            sys.exit(1)
+        accepted.append(R)
+        flanks.extend([R, rc_seq(R)])
+        pairs.append((stem, F, R))
+
+    print("")
+    print("========== 各文库引物对 ==========")
+    for stem, F, R in pairs:
+        print("%-18s F=%s R=%s (PCR 反向引物 %s)" % (stem, F, R, rc_seq(R)))
+    print("==================================")
+
+    with open(cfg["out"], "w") as f:
+        f.write("# mode=shared 多文库共芯片; tail-k=%d inner-k=%d dimer-k=%d; seed=%s%s" % (
+            tk, ik, cfg["dimer_k"], args.seed, chr(10)))
+        f.write("# library%sF_primer(5侧翼,即PCR正向引物)%sR_site(3侧翼)%sR_pcr_primer%s" % (
+            chr(9), chr(9), chr(9), chr(10)))
+        for stem, F, R in pairs:
+            f.write("%s%s%s%s%s%s%s%s" % (
+                stem, chr(9), F, chr(9), R, chr(9), rc_seq(R), chr(10)))
+    print("")
+    print("[输出] %s" % cfg["out"])
+    print("")
+    print("用法提示: 每个文库用各自的 F/R 跑 build_oligos.py 出合成单;")
+    print("  分离单一文库 = 用该文库的引物对 PCR; 全部引物已对联合 pool 与其他")
+    print("  文库侧翼做过 k-mer 隔离, 文库间扩增干扰最小.")
+    print("")
+    print("总用时 %.1f s" % (time.time() - t0))
+
+
+def _run_check(fasta_paths, args, cfg):
+    """--check: 对全部输入文件校验已有引物(多文件 = 联合 pool, 即共芯片口径)"""
+    t0 = time.time()
+    print("[读取] %d 个输入文件:" % len(fasta_paths))
+    union, _ = _read_union(fasta_paths)
+    print("[构建] 对联合 pool 自动选 k 并构建 k-mer 集合 ...")
+    pool = union + [rc_seq(s) for s in union]
+    tk, ik, sets = resolve_k_and_build(pool, primer_len=args.primer_len)
+    cfg["tail_k"], cfg["inner_k"] = tk, ik
+    print("  用时 %.1f s" % (time.time() - t0))
+    if len(fasta_paths) > 1:
+        print("  (多个输入文件已合并为联合 pool 校验, 即共芯片口径)")
+    check_primers(sets, cfg, args.check)
+
+
 # ========================= main =========================
 def main():
     ap = argparse.ArgumentParser(
         description="oligopool 两侧通用引物结合序列设计",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    ap.add_argument("--fasta", required=True, help="oligopool 序列(FASTA)")
+    ap.add_argument("--fasta", required=True, nargs="+", metavar="FASTA",
+                    help="oligopool 序列(FASTA), 可传多个文件(配合 --mode)")
+    ap.add_argument("--mode", choices=["separate", "shared"], default="separate",
+                    help="多文件模式(仅多文件时生效): separate=模式1,每个文件独立一张芯片;"
+                         " shared=模式2,多文库共一张芯片并隔离各文库")
     ap.add_argument("--out", default=None,
-                    help="输出引物文件(默认在 fasta 同目录 safe_primers.txt)")
-    ap.add_argument("-n", "--n-primers", type=int, default=20, help="生成引物条数")
+                    help="输出文件(单文件/shared 模式生效; 多文件 separate 模式自动按文件名输出)")
+    ap.add_argument("-n", "--n-primers", type=int, default=20,
+                    help="生成引物条数(单文件/separate 模式; shared 模式每文库固定一对)")
     ap.add_argument("--threads", type=int, default=20, help="并行进程数(1=单线程)")
     ap.add_argument("--primer-len", type=int, default=20, help="引物长度")
     ap.add_argument("--gc-min", type=float, default=0.40, help="GC 下限")
@@ -448,46 +628,35 @@ def main():
 
     cfg = vars(args).copy()
     cfg["param_line"] = " ".join(sys.argv[1:])
-    if cfg["out"] is None:
-        cfg["out"] = os.path.join(
-            os.path.dirname(os.path.abspath(args.fasta)), "safe_primers.txt")
-
-    t0 = time.time()
-    print("[1/4] 读取 %s ..." % args.fasta)
-    seqs = [s.upper() for s in read_fasta(args.fasta) if s]
-    if not seqs:
-        sys.stderr.write("[错误] FASTA 中没有序列")
-        sys.exit(1)
-    n_bad = sum(1 for s in seqs for c in s if c not in "ACGTN")
-    total_bp = sum(len(s) for s in seqs)
-    print("  %d 条序列, 共 %.2f Mb; 非法碱基 %d 个(自动按断点处理)" % (
-        len(seqs), total_bp / 1e6, n_bad))
-    print("  加入反向互补链后总池 %.2f Mb" % (2 * total_bp / 1e6))
-
-    print("[2/4] 自动确定 k 阈值并构建 k-mer 集合 (%s) ..." % (
-        "numpy 加速" if np is not None else "纯 python"))
-    pool_seqs = seqs + [rc_seq(s) for s in seqs]
-    tk, ik, sets = resolve_k_and_build(pool_seqs, primer_len=args.primer_len)
-    cfg["tail_k"], cfg["inner_k"] = tk, ik
-    for k in sorted({tk, ik}):
-        print("  k=%d: %d 个不同 k-mer" % (k, len(sets[k])))
-    print("  用时 %.1f s" % (time.time() - t0))
+    fastas = args.fasta
 
     if args.check:
-        check_primers(sets, cfg, args.check)
+        _run_check(fastas, args, cfg)
         return
 
-    # 信息: 随机 k-mer 落在 pool 的比例(自动选 k 已保证可行性)
-    rng0 = random.Random(args.seed if args.seed is not None else 20260929)
-    for k in sorted({tk, ik}):
-        print("  随机 %d-mer 落在 pool 的比例: %.2f%%" % (
-            k, 100 * sample_presence(sets, k, rng0)))
+    if len(fastas) == 1:
+        if cfg["out"] is None:
+            cfg["out"] = os.path.join(
+                os.path.dirname(os.path.abspath(fastas[0])), "safe_primers.txt")
+        process_single(fastas[0], args, cfg)
+        return
 
-    accepted = generate_primers(sets, cfg)
-    print_report(accepted)
-    _write_outputs(accepted, cfg)
-    print("")
-    print("总用时 %.1f s" % (time.time() - t0))
+    if args.mode == "separate":
+        print("模式1 (separate): %d 个文件各自独立设计(每个文件单独一张芯片), 依次处理" % len(fastas))
+        print("")
+        for i2, fp in enumerate(fastas, 1):
+            out = os.path.join(os.path.dirname(os.path.abspath(fp)),
+                               os.path.splitext(os.path.basename(fp))[0] + "_safe_primers.txt")
+            print("===== [%d/%d] %s =====" % (i2, len(fastas), fp))
+            cfg["out"] = out
+            process_single(fp, args, cfg)
+            print("")
+    else:
+        print("模式2 (shared): %d 个文库共一张芯片, 联合设计并隔离各文库" % len(fastas))
+        if cfg["out"] is None:
+            cfg["out"] = os.path.join(
+                os.path.dirname(os.path.abspath(fastas[0])), "safe_primers_shared.tsv")
+        process_shared(fastas, args, cfg)
 
 
 if __name__ == "__main__":

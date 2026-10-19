@@ -33,6 +33,36 @@ The pool's reverse complements are always included automatically, so a primer th
 
 > Note: the classic "check 11-mer and 12-mer separately" scheme is redundant — any 12-mer match implies an 11-mer match. This tool applies a single internal k-mer rule, auto-selected (see below), which is equivalent to the stricter of the two.
 
+## Multi-file modes
+
+`--fasta` accepts multiple files. What they mean depends on `--mode`:
+
+### `--mode separate` (default) — one chip per file
+
+Each file is synthesized on its own chip, so each gets an independent design, run back-to-back. Output is one primer set per file, auto-named `<file stem>_safe_primers.txt` next to each input (`--out` does not apply here).
+
+```bash
+python3 oligopool_primer_design.py --fasta libA.fa libB.fa libC.fa
+```
+
+### `--mode shared` — multiple libraries on one chip
+
+All libraries are synthesized together, so each library needs its own primer pair while amplification interference between libraries is minimized. The tool assigns one F/R pair per library, screening every primer against:
+
+- the **combined pool of all libraries** (both strands) — no mispriming anywhere on the chip;
+- the **flanking sequences of the other libraries** (and their reverse complements, same k-mer standard) — so amplified product carried over into another library's PCR cannot seed artifacts;
+- pairwise 3′ dimer checks across **all** primers of all libraries.
+
+Each library can then be pulled out specifically by PCR with its own pair. Output is a single TSV (`safe_primers_shared.tsv`) with one row per library: `library, F_primer, R_site, R_pcr_primer`. `-n` does not apply (exactly one pair per library).
+
+```bash
+python3 oligopool_primer_design.py --fasta libA.fa libB.fa libC.fa --mode shared
+# then build each library's synthesis file with its own pair:
+python3 build_oligos.py --fasta libA.fa --primer-f <A_F> --primer-r <A_R_site>
+```
+
+`--check` also understands this TSV, and with multiple `--fasta` inputs it validates primers against the combined pool (i.e. the shared-chip reality).
+
 ## How the k thresholds are chosen
 
 The tail-k / inner-k values are **fully automatic and not user-settable** — the tool always picks the smallest feasible pair for your pool: it starts at the strictest 10 / 11, verifies feasibility with a 150,000-candidate pilot run against your actual pool, and relaxes by +1 (capped at min(21, primer length)) until candidates pass. The chosen pair is printed on every run. This keeps every design at the strictest standard its pool allows, with no parameters to guess.
@@ -99,8 +129,9 @@ Orientation conventions:
 
 | Flag | Default | Meaning |
 |---|---|---|
-| `--fasta` | (required) | oligopool sequences, FASTA |
-| `--out` | fasta dir + `safe_primers.txt` | output file |
+| `--fasta` | (required, 1+) | oligopool sequences, FASTA; multiple files allowed (see modes) |
+| `--mode` | separate | multi-file mode: `separate` = one chip per file, `shared` = all libraries on one chip, mutually isolated |
+| `--out` | see below | output file (single-file and shared modes; separate mode auto-names per input) |
 | `-n, --n-primers` | 20 | how many primers to generate |
 | `--threads` | 20 | worker processes (1 = single-threaded) |
 | `--primer-len` | 20 | primer length |

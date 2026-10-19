@@ -33,6 +33,36 @@ pool 的反向互补链始终自动加入，因此这里通过的引物在两个
 
 > 注：经典做法"分别检查 11-mer 和 12-mer"是冗余的——任何 12-mer 命中必然伴随其子 11-mer 命中。本工具采用单一内部 k-mer 规则（自动选择，见下），等效于两者中更严格的那个。
 
+## 多文件模式
+
+`--fasta` 可传多个文件，含义由 `--mode` 决定：
+
+### `--mode separate`（默认）—— 每个文件单独一张芯片
+
+每个文件各自合成、各自独立设计，依次执行。每个文件输出一组引物，自动命名为输入同目录的 `<文件名>_safe_primers.txt`（此模式下 `--out` 不生效）。
+
+```bash
+python3 oligopool_primer_design.py --fasta libA.fa libB.fa libC.fa
+```
+
+### `--mode shared` —— 多文库共用一张芯片
+
+多个文库在同一张芯片上合成，每个文库需要专属引物对，且文库间扩增干扰要尽可能小。程序为每个文库分配一对 F/R，每条引物都通过以下联合筛选：
+
+- 对**全部文库的联合 pool**（含双链）做标准 k-mer 安全检查——芯片上任何位置都不错配；
+- 对**其他文库的侧翼序列**（含反向互补，同样的 k-mer 标准）隔离——其他文库的扩增产物流失到本文库反应中也不会引发假扩增；
+- 全部文库所有引物之间两两 3′ 端二聚体检查。
+
+之后用各文库自己的引物对 PCR 即可分离出单一文库。输出为单个 TSV（`safe_primers_shared.tsv`），每文库一行：`library, F_primer, R_site, R_pcr_primer`。此模式 `-n` 不适用（每文库固定一对）。
+
+```bash
+python3 oligopool_primer_design.py --fasta libA.fa libB.fa libC.fa --mode shared
+# 之后每个文库用各自的 F/R 生成合成文件:
+python3 build_oligos.py --fasta libA.fa --primer-f <A的F> --primer-r <A的R_site>
+```
+
+`--check` 也能直接读这个 TSV；且传多个 `--fasta` 时按联合 pool 校验（即共芯片口径）。
+
 ## k 阈值如何确定
 
 tail-k / inner-k **完全自动、不可手动指定**——程序总是为你的 pool 选择可行的最小组合：从最严格的 10 / 11 出发，用 15 万条随机候选做预试验、对实际 pool 实测通过率，不行就 +1 逐步放宽（上限为 min(21, 引物长度)），直到有候选通过。每次运行都会打印选定的组合。这保证每个设计都用其 pool 所允许的最严格标准，无需猜测任何参数。
@@ -99,8 +129,9 @@ python3 build_oligos.py --fasta my_pool.fa \
 
 | 参数 | 默认值 | 含义 |
 |---|---|---|
-| `--fasta` | （必填） | oligopool 序列，FASTA 格式 |
-| `--out` | fasta 同目录 `safe_primers.txt` | 输出文件 |
+| `--fasta` | （必填，可多个） | oligopool 序列，FASTA；可传多个文件（见多文件模式） |
+| `--mode` | separate | 多文件模式：`separate`=每个文件独立一张芯片；`shared`=多文库共芯片、互相隔离 |
+| `--out` | 见下 | 输出文件（单文件/shared 模式生效；separate 模式按输入文件名自动命名） |
 | `-n, --n-primers` | 20 | 生成引物条数 |
 | `--threads` | 20 | 并行进程数（1 = 单线程） |
 | `--primer-len` | 20 | 引物长度 |
