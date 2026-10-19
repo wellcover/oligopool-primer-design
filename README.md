@@ -78,6 +78,16 @@ Reference values (total bases, both strands; from random and genome-derived test
 
 Genome-derived pools usually allow smaller k than random-sequence pools of the same size: their k-mer distribution is GC-skewed while candidate primers are GC-balanced, so the relevant k-mers are the rare ones. If no k up to the cap works, the tool reports it instead of looping forever.
 
+## Windows GUI
+
+No Python needed: grab `oligopool-primer-design.exe` from [Releases](../../releases), double-click, and use the window to
+
+- add one or many FASTA files and design primers (both modes, separate F/R lengths, seed for reproducibility),
+- validate an existing primer file against the current pool,
+- attach F/R flanks to a payload and export the synthesis-ready `.fa` / `.csv` / `.pcr_primers.txt`.
+
+Everything runs locally; a 42,000-oligo / 6.7 Mb pool takes on the order of a minute on a typical lab PC. The GUI is a thin layer over the same two scripts (`oligopool_gui.py`), so results are identical to the command line.
+
 ## Requirements
 
 - Python 3.6+ (stdlib only)
@@ -134,7 +144,7 @@ Orientation conventions:
 | `--out` | see below | output file (single-file and shared modes; separate mode auto-names per input) |
 | `-n, --n-primers` | 20 | how many primers to generate |
 | `--threads` | 20 | worker processes (1 = single-threaded) |
-| `--primer-len` | 20 | primer length |
+| `--primer-len F [R]` | 20 | primer length; one value = F and R, two values = separate F / R lengths |
 | `--gc-min / --gc-max` | 0.40 / 0.60 | GC window |
 | `--max-homopolymer` | 5 | reject if any single-base run ≥ this |
 | `--max-gc-run` | 5 | reject if any G/C-only run ≥ this |

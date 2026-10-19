@@ -78,6 +78,16 @@ tail-k / inner-k **完全自动、不可手动指定**——程序总是为你�
 
 基因组来源的 pool 通常比同样大小的随机序列 pool 允许更小的 k：其 k-mer 分布受 GC 偏向影响，而候选引物 GC 居中，恰好落在稀有 k-mer 区域。若到上限仍无可行组合，程序会明确报告而不是死循环。
 
+## Windows 图形界面
+
+无需安装 Python：从 [Releases](../../releases) 下载 `oligopool-primer-design.exe`，双击即可使用，窗口内可以——
+
+- 添加一个或多个 FASTA 文件并设计引物（两种模式、F/R 分别设长度、随机种子可复现）；
+- 校验已有引物文件对当前 pool 是否仍安全；
+- 把 F/R 侧翼接到 payload 上，导出送合成的 `.fa` / `.csv` / `.pcr_primers.txt`。
+
+全部计算在本地完成；4.2 万条 / 6.7 Mb 的 pool 在普通实验室电脑上约一分钟量级。GUI 只是两个脚本的图形外壳（`oligopool_gui.py`），结果与命令行完全一致。
+
 ## 环境要求
 
 - Python 3.6+（仅标准库）
@@ -134,7 +144,7 @@ python3 build_oligos.py --fasta my_pool.fa \
 | `--out` | 见下 | 输出文件（单文件/shared 模式生效；separate 模式按输入文件名自动命名） |
 | `-n, --n-primers` | 20 | 生成引物条数 |
 | `--threads` | 20 | 并行进程数（1 = 单线程） |
-| `--primer-len` | 20 | 引物长度 |
+| `--primer-len F [R]` | 20 | 引物长度; 1 个值 = F/R 同长, 2 个值 = 分别指定 F / R 长度 |
 | `--gc-min / --gc-max` | 0.40 / 0.60 | GC 含量窗口 |
 | `--max-homopolymer` | 5 | 同碱基连续达到该值即拒绝 |
 | `--max-gc-run` | 5 | 纯 G/C 连续达到该值即拒绝 |

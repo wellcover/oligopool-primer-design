@@ -208,13 +208,13 @@ def dimer_ok(cand, accepted, dimer_k):
 
 
 # ========================= worker =========================
-def _worker(i):
-    # 每个任务按 (seed, 任务号) 派生独立随机流:
+def _worker(task):
+    # 任务 = (任务号, 长度); 随机流按 (seed, 任务号, 长度) 派生:
     # 1) fork 出的 worker 不会共享同一条随机流(原版 bug)
     # 2) 与调度无关, 同一 --seed 多线程也可精确复现
+    i, L = task
     cfg, sets = _G["cfg"], _G["sets"]
-    rng = random.Random(((cfg["seed"] or 0) << 32) ^ i)
-    L = cfg["primer_len"]
+    rng = random.Random(((cfg["seed"] or 0) << 32) ^ (i << 7) ^ L)
     for _attempt in range(cfg["max_attempts"]):
         p = "".join(rng.choices("ACGT", k=L))
         if not fail_reasons_both(p, cfg, sets):
@@ -270,8 +270,12 @@ def resolve_k_and_build(pool_seqs, primer_len=20, verbose=True, n_try=150000):
     t0 = time.time()
     tk, ik = 10, 11
     k_max = min(21, primer_len)
+    cache = {}
     while True:
-        sets = build_kmer_sets(pool_seqs, [tk, ik])
+        for kk in (tk, ik):
+            if kk not in cache:
+                cache[kk] = build_kmer_sets(pool_seqs, [kk])[kk]
+        sets = {kk: cache[kk] for kk in (tk, ik)}
         hits = pilot_hits(sets, tk, ik, primer_len=primer_len, n_try=n_try)
         if verbose:
             print("  自动尝试 tail-k=%d / inner-k=%d: 预试验 %d 条随机候选通过 %d 条" % (
@@ -290,28 +294,34 @@ def resolve_k_and_build(pool_seqs, primer_len=20, verbose=True, n_try=150000):
 
 # ========================= 生成主流程 =========================
 def generate_primers(sets, cfg):
+    # 按长度分组生成: cfg["primer_lens"] 为 [L] 或 [F长, R长];
+    # seen/dimer 池贯穿全部组, 跨组任取两条也互相兼容
+    lens = cfg["primer_lens"]
     n = cfg["n_primers"]
-    accepted, seen = [], set()
-    dim_pool = []
+    labels = ["F", "R"] if len(lens) > 1 else ["P"]
+    groups = []
+    seen, dim_pool = set(), []
     t0 = time.time()
     print("")
-    print("[3/4] 生成引物 (n=%d, threads=%d) ..." % (n, cfg["threads"]))
+    print("[3/4] 生成引物 (n=%d/组, 长度 %s, threads=%d) ..." % (
+        n, "/".join(str(x) for x in lens), cfg["threads"]))
 
-    def accept_stream(cands):
+    def accept_stream(cands, bucket):
         got = 0
         for c in cands:
             if c is None or c in seen:
                 continue
             seen.add(c)
-            if not dimer_ok(c, dim_pool, cfg["dimer_k"]) or                     not dimer_ok(rc_seq(c), dim_pool, cfg["dimer_k"]):
+            if not dimer_ok(c, dim_pool, cfg["dimer_k"]) or not dimer_ok(rc_seq(c), dim_pool, cfg["dimer_k"]):
                 continue
-            accepted.append(c)
+            bucket.append(c)
             dim_pool.extend([c, rc_seq(c)])
             got += 1
-            if len(accepted) >= n:
+            if len(bucket) >= n:
                 break
         return got
 
+    ctx = None
     if cfg["threads"] > 1:
         try:
             ctx = mp.get_context("fork")
@@ -320,73 +330,80 @@ def generate_primers(sets, cfg):
         if ctx is None:
             print("警告: 当前平台不支持 fork, 退化为单线程")
             cfg["threads"] = 1
-        else:
+
+    task_base = 0
+    for gi, L in enumerate(lens):
+        bucket = []
+        if ctx is not None:
             _G["sets"], _G["cfg"] = sets, cfg
-            task_base = 0
             with ctx.Pool(cfg["threads"]) as pool:
                 for _round in range(100):
-                    batch = max(64, (n - len(accepted)) * 3)
-                    # pool.map 保持任务号顺序返回, 保证 --seed 下贪心接受顺序确定
+                    batch = max(64, (n - len(bucket)) * 3)
                     got = accept_stream(
-                        pool.map(_worker, range(task_base, task_base + batch)))
+                        pool.map(_worker, [(task_base + j, L) for j in range(batch)]),
+                        bucket)
                     task_base += batch
-                    if len(accepted) >= n or got == 0:
+                    if len(bucket) >= n or got == 0:
                         break
-    if cfg["threads"] <= 1:
-        _G["sets"], _G["cfg"] = sets, cfg
-        counter = 0
-        while len(accepted) < n:
-            c = _worker(counter)
-            counter += 1
-            if c is None:
-                break
-            accept_stream([c])
-
-    if len(accepted) < n:
-        sys.stderr.write("")
-        sys.stderr.write("[错误] 只得到 %d/%d 条引物, 约束可能不可满足:" % (len(accepted), n))
-        sys.stderr.write("  请尝试放宽 --gc-min/--gc-max 或增大 --max-attempts.")
-        if accepted:
-            _write_outputs(accepted, cfg)
-            sys.stderr.write("已将部分结果写出, 请调整参数后重试.")
-        sys.exit(1)
-
-    print("  完成: %d 条引物, 用时 %.1f s" % (len(accepted), time.time() - t0))
-    return accepted
-
+        else:
+            _G["sets"], _G["cfg"] = sets, cfg
+            while len(bucket) < n:
+                c = _worker((task_base, L))
+                task_base += 1
+                if c is None:
+                    break
+                accept_stream([c], bucket)
+        groups.append((labels[gi], bucket))
+        if len(bucket) < n:
+            sys.stderr.write("[错误] 长度 %d 只得到 %d/%d 条引物, 约束可能不可满足;" % (L, len(bucket), n))
+            sys.stderr.write("  请尝试放宽 --gc-min/--gc-max 或增大 --max-attempts.")
+            if any(g[1] for g in groups):
+                _write_outputs(groups, cfg)
+                sys.stderr.write("已将部分结果写出, 请调整参数后重试.")
+            sys.exit(1)
+        print("  长度 %d: 完成 %d 条 (累计用时 %.1f s)" % (L, len(bucket), time.time() - t0))
+    return groups
 
 def tm_wallace(p):
     return 2 * (p.count("A") + p.count("T")) + 4 * (p.count("G") + p.count("C"))
 
 
-def _write_outputs(accepted, cfg):
+def _write_outputs(groups, cfg):
+    # groups = [(标签, [引物])]; txt 兼容旧格式, tsv 带组前缀与明细
     with open(cfg["out"], "w") as f:
-        for p in accepted:
-            f.write(p + chr(10))
+        for label, seqs in groups:
+            for p in seqs:
+                f.write(p + chr(10))
     tsv = cfg["out"] + ".tsv"
     with open(tsv, "w") as f:
         f.write("# %s%s" % (cfg["param_line"], chr(10)))
-        f.write("name	sequence	len	GC	Tm_Wallace%s" % chr(10))
-        for i, p in enumerate(accepted, 1):
-            f.write("P%02d	%s	%d	%.3f	%d%s" % (
-                i, p, len(p), (p.count("G") + p.count("C")) / len(p),
-                tm_wallace(p), chr(10)))
+        f.write("name%ssequence%slen%sGC%sTm_Wallace%s" % (chr(9), chr(9), chr(9), chr(9), chr(10)))
+        for label, seqs in groups:
+            for i, p in enumerate(seqs, 1):
+                f.write("%s%02d%s%s%s%d%s%.3f%s%d%s" % (
+                    label, i, chr(9), p, chr(9), len(p), chr(9),
+                    (p.count("G") + p.count("C")) / len(p), chr(9),
+                    tm_wallace(p), chr(10)))
     print("")
     print("[4/4] 结果写入:")
     print("  %s  (每行一条, 兼容旧格式)" % cfg["out"])
     print("  %s  (带 GC/Tm 明细)" % tsv)
 
 
-def print_report(accepted):
+def print_report(groups):
     print("")
     print("========== 安全引物 ==========")
-    print("%-6s %-22s %6s %6s" % ("name", "sequence", "GC%", "Tm"))
-    for i, p in enumerate(accepted, 1):
-        print("P%02d    %-22s %5.1f%% %5dC" % (
-            i, p, 100 * (p.count("G") + p.count("C")) / len(p), tm_wallace(p)))
+    print("%-6s %-24s %6s %6s" % ("name", "sequence", "GC%", "Tm"))
+    for label, seqs in groups:
+        for i, p in enumerate(seqs, 1):
+            print("%s%02d    %-24s %5.1f%% %5dC" % (
+                label, i, p, 100 * (p.count("G") + p.count("C")) / len(p),
+                tm_wallace(p)))
     print("==============================")
-    print("用法提示: 任取两条 P_i/P_j; 5′ 端加 P_i, 3′ 端加 P_j(其反向互补即为返端引物)")
-
+    if len(groups) > 1:
+        print("用法提示: 5′ 端从 F 组任取, 3′ 端从 R 组任取(R 的反向互补即为反向引物)")
+    else:
+        print("用法提示: 任取两条 P_i/P_j; 5′ 端加 P_i, 3′ 端加 P_j(其反向互补即为返端引物)")
 
 # ========================= --check 模式 =========================
 def check_primers(sets, cfg, path):
@@ -462,9 +479,8 @@ def flank_conflict(primer, flank_pool, tk, ik):
     return False
 
 
-def _gen_shared(sets, cfg, flank_pool, accepted, rng):
-    """生成一条共芯片安全引物: 常规安全检查 + 跨文库侧翼检查 + 全体两两二聚体检查"""
-    L = cfg["primer_len"]
+def _gen_shared(sets, cfg, flank_pool, accepted, rng, L):
+    """生成长度 L 的共芯片安全引物: 常规安全检查 + 跨文库侧翼检查 + 全体两两二聚体检查"""
     for _attempt in range(cfg["max_attempts"]):
         p = "".join(rng.choices("ACGT", k=L))
         if fail_reasons_both(p, cfg, sets):
@@ -509,7 +525,7 @@ def process_single(fasta_path, args, cfg):
     print("[2/4] 自动确定 k 阈值并构建 k-mer 集合 (%s) ..." % (
         "numpy 加速" if np is not None else "纯 python"))
     pool_seqs = seqs + [rc_seq(s) for s in seqs]
-    tk, ik, sets = resolve_k_and_build(pool_seqs, primer_len=args.primer_len)
+    tk, ik, sets = resolve_k_and_build(pool_seqs, primer_len=cfg["primer_len"])
     cfg["tail_k"], cfg["inner_k"] = tk, ik
     for k in sorted({tk, ik}):
         print("  k=%d: %d 个不同 k-mer" % (k, len(sets[k])))
@@ -520,9 +536,9 @@ def process_single(fasta_path, args, cfg):
         print("  随机 %d-mer 落在 pool 的比例: %.2f%%" % (
             k, 100 * sample_presence(sets, k, rng0)))
 
-    accepted = generate_primers(sets, cfg)
-    print_report(accepted)
-    _write_outputs(accepted, cfg)
+    groups = generate_primers(sets, cfg)
+    print_report(groups)
+    _write_outputs(groups, cfg)
     print("")
     print("总用时 %.1f s" % (time.time() - t0))
 
@@ -540,7 +556,7 @@ def process_shared(fasta_paths, args, cfg):
     print("[2/3] 对联合 pool 自动选 k 并构建 k-mer 集合 (%s) ..." % (
         "numpy 加速" if np is not None else "纯 python"))
     pool = union + [rc_seq(s) for s in union]
-    tk, ik, sets = resolve_k_and_build(pool, primer_len=args.primer_len)
+    tk, ik, sets = resolve_k_and_build(pool, primer_len=cfg["primer_len"])
     cfg["tail_k"], cfg["inner_k"] = tk, ik
     for k in sorted({tk, ik}):
         print("  k=%d: %d 个不同 k-mer" % (k, len(sets[k])))
@@ -550,7 +566,7 @@ def process_shared(fasta_paths, args, cfg):
     rng = random.Random(args.seed)
     accepted, flanks, pairs = [], [], []
     for stem in stems:
-        F = _gen_shared(sets, cfg, flanks, accepted, rng)
+        F = _gen_shared(sets, cfg, flanks, accepted, rng, cfg["f_len"])
         if F is None:
             sys.stderr.write("[错误] 为文库 %s 生成 F 引物失败, 约束过紧;" % stem)
             sys.stderr.write("  可减少文库数/放宽 --gc-min/--gc-max/增大 --max-attempts,")
@@ -558,7 +574,7 @@ def process_shared(fasta_paths, args, cfg):
             sys.exit(1)
         accepted.extend([F, rc_seq(F)])
         flanks.extend([F, rc_seq(F)])
-        R = _gen_shared(sets, cfg, flanks, accepted, rng)
+        R = _gen_shared(sets, cfg, flanks, accepted, rng, cfg["r_len"])
         if R is None:
             sys.stderr.write("[错误] 为文库 %s 生成 R 引物失败, 约束过紧;" % stem)
             sys.exit(1)
@@ -597,7 +613,7 @@ def _run_check(fasta_paths, args, cfg):
     union, _ = _read_union(fasta_paths)
     print("[构建] 对联合 pool 自动选 k 并构建 k-mer 集合 ...")
     pool = union + [rc_seq(s) for s in union]
-    tk, ik, sets = resolve_k_and_build(pool, primer_len=args.primer_len)
+    tk, ik, sets = resolve_k_and_build(pool, primer_len=cfg["primer_len"])
     cfg["tail_k"], cfg["inner_k"] = tk, ik
     print("  用时 %.1f s" % (time.time() - t0))
     if len(fasta_paths) > 1:
@@ -606,7 +622,7 @@ def _run_check(fasta_paths, args, cfg):
 
 
 # ========================= main =========================
-def main():
+def main(argv=None):
     ap = argparse.ArgumentParser(
         description="oligopool 两侧通用引物结合序列设计",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter)
@@ -620,7 +636,9 @@ def main():
     ap.add_argument("-n", "--n-primers", type=int, default=20,
                     help="生成引物条数(单文件/separate 模式; shared 模式每文库固定一对)")
     ap.add_argument("--threads", type=int, default=20, help="并行进程数(1=单线程)")
-    ap.add_argument("--primer-len", type=int, default=20, help="引物长度")
+    ap.add_argument("--primer-len", type=int, nargs="+", default=[20],
+                    metavar=("F_LEN", "R_LEN"),
+                    help="引物长度; 1 个值=F/R 同长, 2 个值=分别指定 F 和 R 长度")
     ap.add_argument("--gc-min", type=float, default=0.40, help="GC 下限")
     ap.add_argument("--gc-max", type=float, default=0.60, help="GC 上限")
     ap.add_argument("--max-homopolymer", type=int, default=5,
@@ -636,15 +654,23 @@ def main():
                     help="每条引物最大尝试次数(防死循环)")
     ap.add_argument("--check", default=None, metavar="PRIMER_FILE",
                     help="校验模式: 检查已有引物(每行一条)对当前 pool 是否仍安全")
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
 
-    if not (4 <= args.primer_len <= 60):
-        ap.error("--primer-len 应在 4-60 之间")
+    if not (1 <= len(args.primer_len) <= 2):
+        ap.error("--primer-len 需要 1 或 2 个值")
+    for v in args.primer_len:
+        if not (4 <= v <= 60):
+            ap.error("--primer-len 每个值应在 4-60 之间")
+    f_len = args.primer_len[0]
+    r_len = args.primer_len[-1]
     if not (0 < args.gc_min < args.gc_max < 1):
         ap.error("需满足 0 < gc-min < gc-max < 1")
 
     cfg = vars(args).copy()
-    cfg["param_line"] = " ".join(sys.argv[1:])
+    cfg["param_line"] = " ".join(argv if argv is not None else sys.argv[1:])
+    cfg["f_len"], cfg["r_len"] = f_len, r_len
+    cfg["primer_len"] = max(f_len, r_len)
+    cfg["primer_lens"] = [f_len] if f_len == r_len else [f_len, r_len]
     fastas = args.fasta
 
     if args.check:

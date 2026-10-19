@@ -90,7 +90,7 @@ def verify_pair(f, r_site, sets, tail_k, inner_k, dimer_k):
     return problems
 
 
-def main():
+def main(argv=None):
     ap = argparse.ArgumentParser(
         description="oligopool 加引物侧翼, 生成送合成完整序列",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter)
@@ -107,7 +107,7 @@ def main():
     ap.add_argument("--dimer-k", type=int, default=8, help="校验用二聚体检查长度(0=关)")
     ap.add_argument("--max-len", type=int, default=300,
                     help="完整 oligo 长度告警阈值(仅提示, 不截断)")
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
 
     pf = args.primer_f.upper().strip()
     pr = args.primer_r.upper().strip()
